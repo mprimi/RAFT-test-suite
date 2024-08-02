@@ -289,7 +289,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 
 		case AppendEntriesResponseOp:
 			appendEntriesResponse := message.(*AppendEntriesResponse)
-			rn.Log("received append entries response from %s", appendEntriesResponse.ResponderId)
+			rn.Log("received append entries response from %s: %+v", appendEntriesResponse.ResponderId, appendEntriesResponse)
 
 			if !rn.isKnownPeer(appendEntriesResponse.ResponderId) {
 				rn.Log("ignoring append entries response from unknown peer: %s", appendEntriesResponse.ResponderId)
