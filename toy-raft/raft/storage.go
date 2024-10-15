@@ -1,7 +1,6 @@
 package raft
 
 type Storage interface {
-
 	GetCurrentTerm() uint64
 	// zeroes votedFor as a side effect
 	IncrementTerm() uint64
@@ -13,6 +12,7 @@ type Storage interface {
 
 	AppendEntry(entry Entry) error
 	DeleteEntriesFrom(index uint64)
+	DeleteEntriesUpTo(index uint64)
 
 	GetLastLogIndex() uint64
 	GetLastLogIndexAndTerm() (index uint64, term uint64)
