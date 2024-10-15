@@ -51,7 +51,8 @@ type RaftNodeImpl struct {
 	network network.Network
 
 	// -- RAFT -- //
-	state   RaftState
+	state RaftState
+	// the log
 	storage Storage
 	// set of peers including self
 	peers map[string]bool
@@ -141,11 +142,17 @@ func (rn *RaftNodeImpl) Start() {
 	rn.sendAppendEntriesTicker = time.NewTicker(heartbeatInterval)
 	stopAndDrainTicker(rn.sendAppendEntriesTicker)
 
+	snapshotTicker := time.NewTicker(30 * time.Second)
+
 	go func() {
 		for {
 			select {
 			case <-rn.quitCh:
 				return
+			case <-snapshotTicker.C:
+				if err := rn.maybeSnapshot(); err != nil {
+					panic(fmt.Errorf("failed to snapshot: %w", err))
+				}
 			default:
 				rn.processOneTransistion()
 			}
@@ -1180,4 +1187,36 @@ func messageToString(opType OperationType, message any) string {
 	}
 
 	return fmt.Sprintf("%s:{%s}", opType, msgString)
+}
+
+// maybeSnapshot will create snapshot
+func (rn *RaftNodeImpl) maybeSnapshot() error {
+
+	/*
+		if stateMachine.Applied - lastSnapshot.Applied < snapshotThreshold -> return
+
+		create a filename
+		open file and create a writer
+		pass writer to statemachine#Snapshot
+		close the file
+
+		create a snapshot_metadata filename
+		open snapshot_metadata file
+		write checksum and stateMachine.Applied of snapshot to metadatafile
+		close metadata file
+
+		trim the log upto stateMachine.Applied
+
+		in AeReqHandling (follower):
+			[if the prevLogIndex is lt node.Committed -> ignore req]
+			will save you from doing the consistency check on entries that might have been trimmed away
+
+		in AeRespHandling (leader):
+			if resp.success is false and follower.nextIndex is lt trimThreshold -> InstallSnapshot() on follower
+			how do we handle in flight snapshots and heartbeats??
+			how do we handle timeout of InstallSnapshot()?
+
+	*/
+
+	return nil
 }
