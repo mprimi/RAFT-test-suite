@@ -104,7 +104,7 @@ func (store *BadgerStorage) setLastLogIdx(newLastLogIdx uint64) {
 		panic(fmt.Errorf("setting invalid last log index"))
 	}
 
-	if firstLogIdx := store.GetFirstLogIndex(); firstLogIdx > newLastLogIdx {
+	if firstLogIdx := store.GetFirstLogIndex(); firstLogIdx > newLastLogIdx+1 {
 		assert.Unreachable("Setting lastLogIndex below trim threshold (firstLogIndex)", map[string]any{
 			"newLastLogIdx":     newLastLogIdx,
 			"currentLastLogIdx": currentLastLogIdx,
@@ -302,7 +302,7 @@ func (store *BadgerStorage) DeleteEntriesFrom(startingLogIdx uint64) {
 				"firstLogIdx":    firstLogIdx,
 			},
 		)
-		panic(fmt.Errorf("Attempted to delete below trim threshold"))
+		panic(fmt.Errorf("attempted to delete below trim threshold"))
 	}
 
 	err := store.db.Update(func(txn *badger.Txn) error {
