@@ -845,6 +845,7 @@ func (rn *RaftNodeImpl) handleAppendEntriesResponse(appendEntriesResponse *Appen
 			PrevLogIdx:      prevLogIndex,
 			PrevLogTerm:     prevLogTerm,
 			LeaderCommitIdx: rn.commitIndex,
+			RequestId:       uuid.NewString(),
 		}
 		rn.SendMessage(appendEntriesResponse.ResponderId, aeRequest)
 		followerState.aeTimestamp = time.Now()

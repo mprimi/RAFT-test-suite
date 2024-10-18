@@ -96,8 +96,8 @@ func assertDeepEqual(t *testing.T, actual any, expected any) {
 
 func assertNil(t *testing.T, actual any) {
 	t.Helper()
-	if actual != nil {
-		t.Fatalf("expected nil, actual %+v", actual)
+	if actual != nil && !reflect.ValueOf(actual).IsNil() {
+		t.Fatalf("expected %+v, actual %+v", nil, actual)
 	}
 }
 
@@ -1188,7 +1188,8 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 				PrevLogIdx:      expectedPrevLogIdx,
 				PrevLogTerm:     expectedPrevLogTerm,
 				LeaderCommitIdx: raftNode.commitIndex,
-				RequestId:       "random-req-id12345",
+				// can't predict this
+				RequestId: "",
 			}
 
 			assertEqual(t, raftNode.state, Leader)
@@ -1204,6 +1205,8 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 			}
 			assertEqual(t, opType, AppendEntriesRequestOp)
 			aeReq := msg.(*AppendEntriesRequest)
+			assertNotEqual(t, aeReq.RequestId, "")
+			expectedNewAEReq.RequestId = aeReq.RequestId
 			assertDeepEqual(t, aeReq, expectedNewAEReq)
 		}
 	})
@@ -1264,6 +1267,11 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 				raftNode = createRaftNode(id, leaderTerm, Leader, testCase.initialLeaderLog)
 				initialCommitIndex := raftNode.commitIndex
 
+				raftNode.followersStateMap[otherPeerId].pendingRequest = &AppendEntriesRequest{
+					Term:      leaderTerm,
+					LeaderId:  id,
+					RequestId: "foo-bar",
+				}
 				raftNode.followersStateMap[otherPeerId].nextIndex = testCase.initialNextIndex
 				raftNode.followersStateMap[otherPeerId].matchIndex = testCase.initialMatchIndex
 
@@ -1272,6 +1280,7 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 					Success:     true,
 					ResponderId: otherPeerId,
 					MatchIndex:  testCase.responseMatchIndex,
+					RequestId:   "foo-bar",
 				})
 
 				// leader state
@@ -1457,11 +1466,16 @@ func TestUpdateLeaderCommitIndex(t *testing.T) {
 			dummyNetwork.lastMessageSent = nil
 			leader = createLeader(leaderPeerId, LEADER_TERM, testCase.initialLeaderCommitIndex, testCase.initialLeaderLog, testCase.initialFollowerMap)
 
+			leader.followersStateMap[responderPeerId].pendingRequest = &AppendEntriesRequest{
+				RequestId: "foobar",
+			}
+
 			sendAppendEntriesResponse(&AppendEntriesResponse{
 				Term:        LEADER_TERM,
 				Success:     true,
 				ResponderId: responderPeerId,
 				MatchIndex:  testCase.responseMatchIndex,
+				RequestId:   "foobar",
 			})
 
 			// leader state
@@ -1594,6 +1608,7 @@ func TestSendAppendEntriesTicker(t *testing.T) {
 			Success:     true,
 			ResponderId: id,
 			MatchIndex:  0,
+			RequestId:   node.followersStateMap[id].pendingRequest.RequestId,
 		}
 		msg := Envelope{
 			OperationType: AppendEntriesResponseOp,
@@ -1610,6 +1625,7 @@ func TestSendAppendEntriesTicker(t *testing.T) {
 			Success:     true,
 			ResponderId: peer1,
 			MatchIndex:  0,
+			RequestId:   node.followersStateMap[peer1].pendingRequest.RequestId,
 		}
 		msg := Envelope{
 			OperationType: AppendEntriesResponseOp,
@@ -1639,7 +1655,7 @@ func TestSendAppendEntriesTicker(t *testing.T) {
 	assertNoErr(t, err)
 	assertEqual(t, opType, AppendEntriesRequestOp)
 	assertNotNil(t, node.followersStateMap[peer2].pendingRequest)
-	assertNotEqual(t, peer2Request.RequestId, node.followersStateMap[peer2].pendingRequest.RequestId)
+	assertEqual(t, peer2Request.RequestId, node.followersStateMap[peer2].pendingRequest.RequestId)
 
 	//wait -> send heartbeat
 	time.Sleep(heartbeatInterval)
