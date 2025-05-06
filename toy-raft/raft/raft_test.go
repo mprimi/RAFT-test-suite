@@ -1783,3 +1783,208 @@ func TestCandidateReceiveVoteResponseTimeoutTimer(t *testing.T) {
 	assertEqual(t, node.state, Leader)
 
 }
+
+func TestFollowerHandleSnapshotRequest(t *testing.T) {
+	dummyNetwork := &TestNetwork{}
+
+	// create a node
+	initTerm := uint64(3)
+	id := "NODE"
+	peer1 := "PEER_1"
+	peer2 := "PEER_2"
+	electionTimerDuration := A_LONG_TIME
+	node := &RaftNodeImpl{
+		id: id,
+		// TODO: mock statemachine
+		stateMachine:             nil,
+		quitCh:                   make(chan bool),
+		inboundMessages:          make(chan []byte, 1000),
+		network:                  dummyNetwork,
+		state:                    Follower,
+		storage:                  NewInMemoryStorage(),
+		peers:                    map[string]bool{id: true, peer1: true, peer2: true},
+		commitIndex:              0,
+		lastApplied:              0,
+		electionTimeoutTimer:     time.NewTimer(electionTimerDuration),
+		voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+		sendAppendEntriesTicker:  time.NewTicker(A_LONG_TIME),
+	}
+	node.storage.SetTerm(initTerm)
+
+	// 10 items in log, 3 committed 7 uncomitted
+	for i := 0; i < 10; i++ {
+		entry := Entry{
+			Term: 1,
+			Cmd:  []byte(fmt.Sprintf("TEST-ENTRY-%d", i)),
+		}
+		node.storage.AppendEntry(entry)
+	}
+	node.commitIndex = 3
+	node.lastApplied = 3
+
+	// incoming snapshot with commitIdx 5 with 2 extra committed entries
+	committedEntries := []Entry{}
+	for i := 6; i <= 7; i++ {
+		committedEntries = append(committedEntries, Entry{
+			Term: initTerm + 1,
+			Cmd:  []byte(fmt.Sprintf("COMMITTED-ENTRY-%d", i)),
+		})
+	}
+
+	installSnapshotRequest := &InstallSnapshotRequest{
+		LeaderId:          id,
+		Term:              initTerm,
+		SnapshotCommitIdx: 5,
+		LastIncludedSnapshotEntry: Entry{
+			Term: initTerm,
+			Cmd:  []byte("SNAPSHOT-ENTRY-5"),
+		},
+		Data:             []byte("abc"),
+		CommittedEntries: committedEntries,
+	}
+	node.inboundMessages <- installSnapshotRequest.Bytes()
+
+	// handle it
+	node.processOneTransistion()
+
+	assertEqual(t, node.commitIndex, 7)
+}
+
+/*
+initialState = {
+first, last, committed, applied
+entries
+}
+
+snapshot
+
+expectedState = {
+first, last, committed, applied
+entries
+}
+
+cases:
+1.
+*/
+func TestHandleSnapshots(t *testing.T) {
+
+	const (
+		SnapshotContent = "THE-SNAPSHOT"
+	)
+
+	dummyNetwork := &TestNetwork{}
+
+	// create a node
+	initTerm := uint64(3)
+	id := "NODE"
+	peer1 := "PEER_1"
+	peer2 := "PEER_2"
+	node := &RaftNodeImpl{
+		id: id,
+		// TODO: mock statemachine
+		stateMachine:             nil,
+		quitCh:                   make(chan bool),
+		inboundMessages:          make(chan []byte, 1000),
+		network:                  dummyNetwork,
+		state:                    Follower,
+		storage:                  NewInMemoryStorage(),
+		peers:                    map[string]bool{id: true, peer1: true, peer2: true},
+		commitIndex:              0,
+		lastApplied:              0,
+		electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+		voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+		sendAppendEntriesTicker:  time.NewTicker(A_LONG_TIME),
+	}
+	node.storage.SetTerm(initTerm)
+
+	testCases := map[string]struct {
+		initialLogSize               int
+		initialCommitAndApplyIndex   uint64
+		initialTrimIndex             uint64
+		expectedInitialFirstLogIndex uint64
+		expectedInitialLastLogIndex  uint64
+		snapshotReq                  InstallSnapshotRequest
+		expectedFirstLogIndex        uint64
+		expectedLastLogIndex         uint64
+		expectedCommitAndApplyIndex  uint64
+		expectedLogEntries           []Entry // each log entry has a value of its log index
+		// expected state
+
+	}{
+		"empty log gets snapshot": {
+			initialLogSize:               0,
+			initialCommitAndApplyIndex:   0,
+			initialTrimIndex:             0,
+			expectedInitialFirstLogIndex: 1,
+			expectedInitialLastLogIndex:  0,
+			snapshotReq: InstallSnapshotRequest{
+				LeaderId:          node.id,
+				Term:              1,
+				SnapshotCommitIdx: 2,
+				LastIncludedSnapshotEntry: Entry{
+					Term: 1,
+					Cmd:  []byte("2"),
+				},
+				Data:             []byte(SnapshotContent),
+				CommittedEntries: []Entry{},
+			},
+			expectedFirstLogIndex:       2,
+			expectedLastLogIndex:        2,
+			expectedCommitAndApplyIndex: 2,
+			expectedLogEntries: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("2"),
+				},
+			},
+		},
+	}
+
+	for description, testCase := range testCases {
+		t.Run(description, func(t *testing.T) {
+			// create log
+			for i := 1; i <= testCase.initialLogSize; i++ {
+				entry := Entry{
+					Term: initTerm,
+					Cmd:  []byte(fmt.Sprintf("%d", i)),
+				}
+				node.storage.AppendEntry(entry)
+			}
+			// init commit/applied
+			node.commitIndex = testCase.expectedCommitAndApplyIndex
+			for i := uint64(1); i <= node.commitIndex; i++ {
+				entry, exists := node.storage.GetLogEntry(i)
+				if !exists {
+					t.Fatalf("failed to get entry %d", i)
+				}
+				node.applyUpdate(entry)
+				node.lastApplied++
+			}
+
+			// trim log for initial state
+			if testCase.initialTrimIndex > 0 {
+				node.storage.DeleteEntriesUpTo(testCase.initialTrimIndex)
+			}
+
+			// TODO: sanity check mock state machine?
+
+			// sanity checks after constructing initial state
+			assertEqual(t, node.storage.GetFirstLogIndex(), testCase.expectedInitialFirstLogIndex)
+			assertEqual(t, node.storage.GetLastLogIndex(), testCase.expectedInitialLastLogIndex)
+			// setup complete
+
+			// send snapshot and process it
+			node.inboundMessages <- testCase.snapshotReq.Bytes()
+			node.processOneTransistion()
+
+			// final state checks
+			assertEqual(t, node.storage.GetFirstLogIndex(), testCase.expectedFirstLogIndex)
+			assertEqual(t, node.storage.GetLastLogIndex(), testCase.expectedLastLogIndex)
+			assertEqual(t, node.commitIndex, testCase.expectedCommitAndApplyIndex)
+			assertEqual(t, node.lastApplied, testCase.expectedCommitAndApplyIndex)
+			actualEntries := node.storage.GetLogEntriesFrom(0)
+			assertDeepEqual(t, actualEntries, testCase.expectedLogEntries)
+		})
+	}
+
+}

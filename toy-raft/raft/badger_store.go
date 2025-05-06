@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 
 	"github.com/antithesishq/antithesis-sdk-go/assert"
@@ -257,6 +258,7 @@ func (store *BadgerStorage) DeleteEntriesUpTo(endingLogIndex uint64) {
 			"lastLogIndex":   lastLogIndex,
 			"endingLogIndex": endingLogIndex,
 		})
+		log.Printf("attempted to trim outside log range, firstLogIndex: %d, lastLogIndex: %d, endingLogIndex: %d", firstLogIndex, lastLogIndex, endingLogIndex)
 		panic(fmt.Errorf("attempted to trim outside log range"))
 	}
 

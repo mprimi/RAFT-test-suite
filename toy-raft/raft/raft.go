@@ -1303,11 +1303,9 @@ func (rn *RaftNodeImpl) getLatestSnapshotFilepath() (string, uint64) {
 		}
 		snapshotApplied, err := strconv.ParseUint(snapshotDetails[2], 10, 64)
 		if err != nil {
-			rn.Log("Error converting snapshot applied to int: %s", err)
 			continue
 		}
 		if snapshotApplied < rn.storage.GetFirstLogIndex()-1 {
-			rn.Log("ignoring outdated snapshot (applied: %d) below trim threshold: %d", snapshotApplied, rn.storage.GetFirstLogIndex())
 			continue
 		}
 		if snapshotApplied > highestApplied {
@@ -1452,12 +1450,21 @@ func (rn *RaftNodeImpl) handleInstallSnapshotRequest(installSnapshotRequest *Ins
 		if err := rn.stateMachine.InstallSnapshot(bytes.NewReader(installSnapshotRequest.Data)); err != nil {
 			panic(fmt.Errorf("failed to install snapshot: %w", err))
 		}
+		rn.commitIndex = installSnapshotRequest.SnapshotCommitIdx
+		rn.lastApplied = installSnapshotRequest.SnapshotCommitIdx
+		// update lastLogIdx
+
 		// 2. trim log up until snapshotCommitIdx + len(CE)
-		snapshotLastIncludedEntryIndex := installSnapshotRequest.SnapshotCommitIdx + uint64(len(installSnapshotRequest.CommittedEntries))
-		rn.storage.DeleteEntriesUpTo(snapshotLastIncludedEntryIndex)
+		snapshotHighestCommittedEntryIndex := installSnapshotRequest.SnapshotCommitIdx + uint64(len(installSnapshotRequest.CommittedEntries))
+		if rn.storage.GetLastLogIndex() > 0 {
+			// we're trimming
+			trimIndex := min(rn.storage.GetLastLogIndex(), snapshotHighestCommittedEntryIndex)
+			rn.Log("Trimming log up until %d", trimIndex)
+			rn.storage.DeleteEntriesUpTo(trimIndex)
+		}
 
 		// 3. prepend committedEntries (in reverse-order)
-		for i := len(installSnapshotRequest.CommittedEntries); i >= 0; i-- {
+		for i := len(installSnapshotRequest.CommittedEntries) - 1; i >= 0; i-- {
 			entry := installSnapshotRequest.CommittedEntries[i]
 			if err := rn.storage.PrependEntry(entry); err != nil {
 				panic(fmt.Errorf("failed to prepend entry: %w", err))
@@ -1469,17 +1476,8 @@ func (rn *RaftNodeImpl) handleInstallSnapshotRequest(installSnapshotRequest *Ins
 			panic(fmt.Errorf("failed to prepend last included entry: %w", err))
 		}
 
-		// 5. apply committedEntries and lastIncludedEntry
-		for i := rn.commitIndex + 1; i <= snapshotLastIncludedEntryIndex+1; i++ {
-			entry, exists := rn.storage.GetLogEntry(i)
-			if !exists {
-				assert.Unreachable("Failed to lookup entry", map[string]any{
-					"entryIndex":  i,
-					"firstLogIdx": rn.storage.GetFirstLogIndex(),
-					"lastLogIdx":  rn.storage.GetLastLogIndex(),
-				})
-				panic(fmt.Errorf("failed to lookup entry"))
-			}
+		// 5. apply committedEntries
+		for _, entry := range installSnapshotRequest.CommittedEntries {
 			rn.applyUpdate(entry)
 			rn.commitIndex++
 		}
