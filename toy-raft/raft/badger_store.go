@@ -640,3 +640,24 @@ func (store *BadgerStorage) IncrementTerm() uint64 {
 	store.SetTerm(newTerm)
 	return newTerm
 }
+
+func (store *BadgerStorage) AdjustOffset(offsetIndex uint64) {
+	lastLogIdx := store.GetLastLogIndex()
+	firstLogIdx := store.GetFirstLogIndex()
+
+	// guard: only should be invoked if log is empty
+	// NOTE: may relax this guard later, for now checking only for misuse
+	if lastLogIdx != 0 || firstLogIdx > 1 {
+		assert.Unreachable(
+			"Attempting to adjust offset on non-empty log",
+			map[string]any{
+				"firstLogIdx": firstLogIdx,
+				"lastLogIdx":  lastLogIdx,
+			},
+		)
+		panic(fmt.Errorf("attempting to adjust offset on non-empty log"))
+	}
+
+	store.setFirstLogIdx(offsetIndex)
+	store.setLastLogIdx(offsetIndex - 1)
+}

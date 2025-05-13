@@ -438,6 +438,7 @@ func (rn *RaftNodeImpl) requestVotes(term uint64, candidateId string) {
 	rn.BroadcastMessage(voteRequest)
 }
 
+// ensure that rn.lastApplied is updated after this is called
 func (rn *RaftNodeImpl) applyUpdate(update Entry) {
 	rn.stateMachine.Apply(update.Cmd)
 }
@@ -1461,6 +1462,9 @@ func (rn *RaftNodeImpl) handleInstallSnapshotRequest(installSnapshotRequest *Ins
 			trimIndex := min(rn.storage.GetLastLogIndex(), snapshotHighestCommittedEntryIndex)
 			rn.Log("Trimming log up until %d", trimIndex)
 			rn.storage.DeleteEntriesUpTo(trimIndex)
+		} else {
+			// nothing to trim, just bump firstLogIdx
+			rn.storage.AdjustOffset(snapshotHighestCommittedEntryIndex + 1)
 		}
 
 		// 3. prepend committedEntries (in reverse-order)
@@ -1479,6 +1483,7 @@ func (rn *RaftNodeImpl) handleInstallSnapshotRequest(installSnapshotRequest *Ins
 		// 5. apply committedEntries
 		for _, entry := range installSnapshotRequest.CommittedEntries {
 			rn.applyUpdate(entry)
+			rn.lastApplied++
 			rn.commitIndex++
 		}
 

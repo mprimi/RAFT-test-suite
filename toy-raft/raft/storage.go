@@ -16,6 +16,9 @@ type Storage interface {
 	DeleteEntriesFrom(index uint64)
 	DeleteEntriesUpTo(index uint64)
 
+	// Mutations
+	AdjustOffset(offsetIndex uint64) // sets first log index
+
 	// Reads
 	GetFirstLogIndex() uint64
 	GetLastLogIndex() uint64

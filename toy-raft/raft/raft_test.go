@@ -39,7 +39,7 @@ func (sm *MockStateMachine) Apply(block []byte) {
 }
 
 func (sm *MockStateMachine) InstallSnapshot(reader io.Reader) error {
-	panic("todo")
+	return nil
 }
 
 func (sm *MockStateMachine) CreateSnapshot(writer io.Writer) error {
@@ -1875,32 +1875,15 @@ func TestHandleSnapshots(t *testing.T) {
 	dummyNetwork := &TestNetwork{}
 
 	// create a node
-	initTerm := uint64(3)
+	initTerm := uint64(1)
 	id := "NODE"
 	peer1 := "PEER_1"
 	peer2 := "PEER_2"
-	node := &RaftNodeImpl{
-		id: id,
-		// TODO: mock statemachine
-		stateMachine:             nil,
-		quitCh:                   make(chan bool),
-		inboundMessages:          make(chan []byte, 1000),
-		network:                  dummyNetwork,
-		state:                    Follower,
-		storage:                  NewInMemoryStorage(),
-		peers:                    map[string]bool{id: true, peer1: true, peer2: true},
-		commitIndex:              0,
-		lastApplied:              0,
-		electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-		voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
-		sendAppendEntriesTicker:  time.NewTicker(A_LONG_TIME),
-	}
-	node.storage.SetTerm(initTerm)
 
 	testCases := map[string]struct {
-		initialLogSize               int
+		initialFirstLogIdx           uint64
+		initialLastLogIdx            int
 		initialCommitAndApplyIndex   uint64
-		initialTrimIndex             uint64
 		expectedInitialFirstLogIndex uint64
 		expectedInitialLastLogIndex  uint64
 		snapshotReq                  InstallSnapshotRequest
@@ -1912,13 +1895,13 @@ func TestHandleSnapshots(t *testing.T) {
 
 	}{
 		"empty log gets snapshot": {
-			initialLogSize:               0,
+			initialLastLogIdx:            0,
 			initialCommitAndApplyIndex:   0,
-			initialTrimIndex:             0,
+			initialFirstLogIdx:           0,
 			expectedInitialFirstLogIndex: 1,
 			expectedInitialLastLogIndex:  0,
 			snapshotReq: InstallSnapshotRequest{
-				LeaderId:          node.id,
+				LeaderId:          id,
 				Term:              1,
 				SnapshotCommitIdx: 2,
 				LastIncludedSnapshotEntry: Entry{
@@ -1938,20 +1921,85 @@ func TestHandleSnapshots(t *testing.T) {
 				},
 			},
 		},
+		"empty log gets snapshot and committed entries": {
+			initialLastLogIdx:            0,
+			initialCommitAndApplyIndex:   0,
+			initialFirstLogIdx:           0,
+			expectedInitialFirstLogIndex: 1,
+			expectedInitialLastLogIndex:  0,
+			snapshotReq: InstallSnapshotRequest{
+				LeaderId:          id,
+				Term:              1,
+				SnapshotCommitIdx: 2,
+				LastIncludedSnapshotEntry: Entry{
+					Term: 1,
+					Cmd:  []byte("2"),
+				},
+				Data: []byte(SnapshotContent),
+				CommittedEntries: []Entry{
+					{
+						Term: 1,
+						Cmd:  []byte("3"),
+					},
+					{
+						Term: 1,
+						Cmd:  []byte("4"),
+					},
+				},
+			},
+			expectedFirstLogIndex:       2,
+			expectedLastLogIndex:        4,
+			expectedCommitAndApplyIndex: 4,
+			expectedLogEntries: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("2"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("3"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("4"),
+				},
+			},
+		},
 	}
 
 	for description, testCase := range testCases {
 		t.Run(description, func(t *testing.T) {
+
+			stateMachine := &MockStateMachine{}
+			// create raft node
+			node := &RaftNodeImpl{
+				id: id,
+				// TODO: mock statemachine
+				stateMachine:             stateMachine,
+				quitCh:                   make(chan bool),
+				inboundMessages:          make(chan []byte, 1000),
+				network:                  dummyNetwork,
+				state:                    Follower,
+				storage:                  NewInMemoryStorage(),
+				peers:                    map[string]bool{id: true, peer1: true, peer2: true},
+				commitIndex:              0,
+				lastApplied:              0,
+				electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+				voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+				sendAppendEntriesTicker:  time.NewTicker(A_LONG_TIME),
+			}
+			node.storage.SetTerm(initTerm)
+
 			// create log
-			for i := 1; i <= testCase.initialLogSize; i++ {
+			for i := 1; i <= testCase.initialLastLogIdx; i++ {
 				entry := Entry{
 					Term: initTerm,
-					Cmd:  []byte(fmt.Sprintf("%d", i)),
+					Cmd:  fmt.Appendf(nil, "%d", i),
 				}
 				node.storage.AppendEntry(entry)
 			}
 			// init commit/applied
-			node.commitIndex = testCase.expectedCommitAndApplyIndex
+			node.commitIndex = testCase.initialCommitAndApplyIndex
 			for i := uint64(1); i <= node.commitIndex; i++ {
 				entry, exists := node.storage.GetLogEntry(i)
 				if !exists {
@@ -1962,8 +2010,8 @@ func TestHandleSnapshots(t *testing.T) {
 			}
 
 			// trim log for initial state
-			if testCase.initialTrimIndex > 0 {
-				node.storage.DeleteEntriesUpTo(testCase.initialTrimIndex)
+			if testCase.initialFirstLogIdx > 0 {
+				node.storage.DeleteEntriesUpTo(testCase.initialFirstLogIdx)
 			}
 
 			// TODO: sanity check mock state machine?
@@ -1974,7 +2022,11 @@ func TestHandleSnapshots(t *testing.T) {
 			// setup complete
 
 			// send snapshot and process it
-			node.inboundMessages <- testCase.snapshotReq.Bytes()
+			envelope := Envelope{
+				OperationType: InstallSnapshotRequestOp,
+				Payload:       testCase.snapshotReq.Bytes(),
+			}
+			node.inboundMessages <- envelope.Bytes()
 			node.processOneTransistion()
 
 			// final state checks
@@ -1982,9 +2034,8 @@ func TestHandleSnapshots(t *testing.T) {
 			assertEqual(t, node.storage.GetLastLogIndex(), testCase.expectedLastLogIndex)
 			assertEqual(t, node.commitIndex, testCase.expectedCommitAndApplyIndex)
 			assertEqual(t, node.lastApplied, testCase.expectedCommitAndApplyIndex)
-			actualEntries := node.storage.GetLogEntriesFrom(0)
+			actualEntries := node.storage.GetLogEntriesFrom(testCase.expectedFirstLogIndex)
 			assertDeepEqual(t, actualEntries, testCase.expectedLogEntries)
 		})
 	}
-
 }
