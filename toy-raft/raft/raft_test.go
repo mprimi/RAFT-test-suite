@@ -1795,8 +1795,7 @@ func TestFollowerHandleSnapshotRequest(t *testing.T) {
 	electionTimerDuration := A_LONG_TIME
 	node := &RaftNodeImpl{
 		id: id,
-		// TODO: mock statemachine
-		stateMachine:             nil,
+		stateMachine:             &MockStateMachine{},
 		quitCh:                   make(chan bool),
 		inboundMessages:          make(chan []byte, 1000),
 		network:                  dummyNetwork,
@@ -1842,7 +1841,11 @@ func TestFollowerHandleSnapshotRequest(t *testing.T) {
 		Data:             []byte("abc"),
 		CommittedEntries: committedEntries,
 	}
-	node.inboundMessages <- installSnapshotRequest.Bytes()
+	msg := Envelope{
+		OperationType: InstallSnapshotRequestOp,
+		Payload:       installSnapshotRequest.Bytes(),
+	}
+	node.inboundMessages <- msg.Bytes()
 
 	// handle it
 	node.processOneTransistion()
@@ -1880,8 +1883,9 @@ func TestHandleSnapshots(t *testing.T) {
 	peer1 := "PEER_1"
 	peer2 := "PEER_2"
 
-	testCases := map[string]struct {
-		initialFirstLogIdx           uint64
+	testCases := []struct {
+		description                  string
+		initialLogOffset             uint64
 		initialLastLogIdx            int
 		initialCommitAndApplyIndex   uint64
 		expectedInitialFirstLogIndex uint64
@@ -1894,10 +1898,11 @@ func TestHandleSnapshots(t *testing.T) {
 		// expected state
 
 	}{
-		"empty log gets snapshot": {
+		{
+			description:                  "empty log gets snapshot",
 			initialLastLogIdx:            0,
 			initialCommitAndApplyIndex:   0,
-			initialFirstLogIdx:           0,
+			initialLogOffset:             0,
 			expectedInitialFirstLogIndex: 1,
 			expectedInitialLastLogIndex:  0,
 			snapshotReq: InstallSnapshotRequest{
@@ -1921,10 +1926,11 @@ func TestHandleSnapshots(t *testing.T) {
 				},
 			},
 		},
-		"empty log gets snapshot and committed entries": {
+		{
+			description:                  "empty log gets snapshot and committed entries",
 			initialLastLogIdx:            0,
 			initialCommitAndApplyIndex:   0,
-			initialFirstLogIdx:           0,
+			initialLogOffset:             0,
 			expectedInitialFirstLogIndex: 1,
 			expectedInitialLastLogIndex:  0,
 			snapshotReq: InstallSnapshotRequest{
@@ -1965,16 +1971,599 @@ func TestHandleSnapshots(t *testing.T) {
 				},
 			},
 		},
+		{
+			description:                  "last committed plus one",
+			initialLastLogIdx:            3,
+			initialCommitAndApplyIndex:   2,
+			initialLogOffset:             0,
+			expectedInitialFirstLogIndex: 1,
+			expectedInitialLastLogIndex:  3,
+			snapshotReq: InstallSnapshotRequest{
+				LeaderId:          id,
+				Term:              1,
+				SnapshotCommitIdx: 3,
+				LastIncludedSnapshotEntry: Entry{
+					Term: 1,
+					Cmd:  []byte("3"),
+				},
+				Data:             []byte(SnapshotContent),
+				CommittedEntries: []Entry{},
+			},
+			expectedFirstLogIndex:       3,
+			expectedLastLogIndex:        3,
+			expectedCommitAndApplyIndex: 3,
+			expectedLogEntries: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("3"),
+				},
+			},
+		},
+		{
+			description:                  "last committed plus one and committed entries",
+			initialLastLogIdx:            3,
+			initialCommitAndApplyIndex:   2,
+			initialLogOffset:             0,
+			expectedInitialFirstLogIndex: 1,
+			expectedInitialLastLogIndex:  3,
+			snapshotReq: InstallSnapshotRequest{
+				LeaderId:          id,
+				Term:              1,
+				SnapshotCommitIdx: 3,
+				LastIncludedSnapshotEntry: Entry{
+					Term: 1,
+					Cmd:  []byte("3"),
+				},
+				Data: []byte(SnapshotContent),
+				CommittedEntries: []Entry{
+					{
+						Term: 1,
+						Cmd:  []byte("4"),
+					},
+					{
+						Term: 1,
+						Cmd:  []byte("5"),
+					},
+				},
+			},
+			expectedFirstLogIndex:       3,
+			expectedLastLogIndex:        5,
+			expectedCommitAndApplyIndex: 5,
+			expectedLogEntries: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("3"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("4"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("5"),
+				},
+			},
+		},
+		{
+			description:                  "snapshot higher than commit index",
+			initialLastLogIdx:            3,
+			initialCommitAndApplyIndex:   3,
+			initialLogOffset:             0,
+			expectedInitialFirstLogIndex: 1,
+			expectedInitialLastLogIndex:  3,
+			snapshotReq: InstallSnapshotRequest{
+				LeaderId:          id,
+				Term:              1,
+				SnapshotCommitIdx: 5,
+				LastIncludedSnapshotEntry: Entry{
+					Term: 1,
+					Cmd:  []byte("5"),
+				},
+				Data:             []byte(SnapshotContent),
+				CommittedEntries: []Entry{},
+			},
+			expectedFirstLogIndex:       5,
+			expectedLastLogIndex:        5,
+			expectedCommitAndApplyIndex: 5,
+			expectedLogEntries: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("5"),
+				},
+			},
+		},
+		{
+			description:                  "snapshot higher than commit index and committed entries",
+			initialLastLogIdx:            3,
+			initialCommitAndApplyIndex:   3,
+			initialLogOffset:             0,
+			expectedInitialFirstLogIndex: 1,
+			expectedInitialLastLogIndex:  3,
+			snapshotReq: InstallSnapshotRequest{
+				LeaderId:          id,
+				Term:              1,
+				SnapshotCommitIdx: 5,
+				LastIncludedSnapshotEntry: Entry{
+					Term: 1,
+					Cmd:  []byte("5"),
+				},
+				Data: []byte(SnapshotContent),
+				CommittedEntries: []Entry{
+					{
+						Term: 1,
+						Cmd:  []byte("6"),
+					},
+					{
+						Term: 1,
+						Cmd:  []byte("7"),
+					},
+				},
+			},
+			expectedFirstLogIndex:       5,
+			expectedLastLogIndex:        7,
+			expectedCommitAndApplyIndex: 7,
+			expectedLogEntries: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("5"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("6"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("7"),
+				},
+			},
+		},
+		{
+			description:                  "nothing committed in log",
+			initialLastLogIdx:            3,
+			initialCommitAndApplyIndex:   0,
+			initialLogOffset:             0,
+			expectedInitialFirstLogIndex: 1,
+			expectedInitialLastLogIndex:  3,
+			snapshotReq: InstallSnapshotRequest{
+				LeaderId:          id,
+				Term:              1,
+				SnapshotCommitIdx: 5,
+				LastIncludedSnapshotEntry: Entry{
+					Term: 1,
+					Cmd:  []byte("5"),
+				},
+				Data:             []byte(SnapshotContent),
+				CommittedEntries: []Entry{},
+			},
+			expectedFirstLogIndex:       5,
+			expectedLastLogIndex:        5,
+			expectedCommitAndApplyIndex: 5,
+			expectedLogEntries: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("5"),
+				},
+			},
+		},
+		{
+			description:                  "nothing committed in log and committed entries",
+			initialLastLogIdx:            3,
+			initialCommitAndApplyIndex:   0,
+			initialLogOffset:             0,
+			expectedInitialFirstLogIndex: 1,
+			expectedInitialLastLogIndex:  3,
+			snapshotReq: InstallSnapshotRequest{
+				LeaderId:          id,
+				Term:              1,
+				SnapshotCommitIdx: 5,
+				LastIncludedSnapshotEntry: Entry{
+					Term: 1,
+					Cmd:  []byte("5"),
+				},
+				Data: []byte(SnapshotContent),
+				CommittedEntries: []Entry{
+					{
+						Term: 1,
+						Cmd:  []byte("6"),
+					},
+					{
+						Term: 1,
+						Cmd:  []byte("7"),
+					},
+				},
+			},
+			expectedFirstLogIndex:       5,
+			expectedLastLogIndex:        7,
+			expectedCommitAndApplyIndex: 7,
+			expectedLogEntries: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("5"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("6"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("7"),
+				},
+			},
+		},
+		{
+			description:                  "install committed plus one with previously trimmed log",
+			initialLastLogIdx:            12,
+			initialCommitAndApplyIndex:   11,
+			initialLogOffset:             9,
+			expectedInitialFirstLogIndex: 10,
+			expectedInitialLastLogIndex:  12,
+			snapshotReq: InstallSnapshotRequest{
+				LeaderId:          id,
+				Term:              1,
+				SnapshotCommitIdx: 12,
+				LastIncludedSnapshotEntry: Entry{
+					Term: 1,
+					Cmd:  []byte("12"),
+				},
+				Data:             []byte(SnapshotContent),
+				CommittedEntries: []Entry{},
+			},
+			expectedFirstLogIndex:       12,
+			expectedLastLogIndex:        12,
+			expectedCommitAndApplyIndex: 12,
+			expectedLogEntries: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("12"),
+				},
+			},
+		},
+		{
+			description:                  "install committed plus one with previously trimmed log and committed entries",
+			initialLastLogIdx:            12,
+			initialCommitAndApplyIndex:   11,
+			initialLogOffset:             9,
+			expectedInitialFirstLogIndex: 10,
+			expectedInitialLastLogIndex:  12,
+			snapshotReq: InstallSnapshotRequest{
+				LeaderId:          id,
+				Term:              1,
+				SnapshotCommitIdx: 12,
+				LastIncludedSnapshotEntry: Entry{
+					Term: 1,
+					Cmd:  []byte("12"),
+				},
+				Data: []byte(SnapshotContent),
+				CommittedEntries: []Entry{
+					{
+						Term: 1,
+						Cmd:  []byte("13"),
+					},
+					{
+						Term: 1,
+						Cmd:  []byte("14"),
+					},
+				},
+			},
+			expectedFirstLogIndex:       12,
+			expectedLastLogIndex:        14,
+			expectedCommitAndApplyIndex: 14,
+			expectedLogEntries: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("12"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("13"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("14"),
+				},
+			},
+		},
+		{
+			description:                  "install below end of log",
+			initialLastLogIdx:            20,
+			initialCommitAndApplyIndex:   10,
+			initialLogOffset:             9,
+			expectedInitialFirstLogIndex: 10,
+			expectedInitialLastLogIndex:  20,
+			snapshotReq: InstallSnapshotRequest{
+				LeaderId:          id,
+				Term:              1,
+				SnapshotCommitIdx: 15,
+				LastIncludedSnapshotEntry: Entry{
+					Term: 1,
+					Cmd:  []byte("15"),
+				},
+				Data:             []byte(SnapshotContent),
+				CommittedEntries: []Entry{},
+			},
+			expectedFirstLogIndex:       15,
+			expectedLastLogIndex:        20,
+			expectedCommitAndApplyIndex: 15,
+			expectedLogEntries: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("15"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("16"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("17"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("18"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("19"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("20"),
+				},
+			},
+		},
+		{
+			description:                  "install below end of log and committed entries",
+			initialLastLogIdx:            20,
+			initialCommitAndApplyIndex:   10,
+			initialLogOffset:             9,
+			expectedInitialFirstLogIndex: 10,
+			expectedInitialLastLogIndex:  20,
+			snapshotReq: InstallSnapshotRequest{
+				LeaderId:          id,
+				Term:              1,
+				SnapshotCommitIdx: 15,
+				LastIncludedSnapshotEntry: Entry{
+					Term: 1,
+					Cmd:  []byte("15"),
+				},
+				Data: []byte(SnapshotContent),
+				CommittedEntries: []Entry{
+					{
+						Term: 1,
+						Cmd:  []byte("16b"),
+					},
+					{
+						Term: 1,
+						Cmd:  []byte("17b"),
+					},
+				},
+			},
+			expectedFirstLogIndex:       15,
+			expectedLastLogIndex:        20,
+			expectedCommitAndApplyIndex: 17,
+			expectedLogEntries: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("15"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("16b"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("17b"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("18"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("19"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("20"),
+				},
+			},
+		},
+		{
+			description:                  "install at last log entry",
+			initialLastLogIdx:            20,
+			initialCommitAndApplyIndex:   10,
+			initialLogOffset:             9,
+			expectedInitialFirstLogIndex: 10,
+			expectedInitialLastLogIndex:  20,
+			snapshotReq: InstallSnapshotRequest{
+				LeaderId:          id,
+				Term:              1,
+				SnapshotCommitIdx: 20,
+				LastIncludedSnapshotEntry: Entry{
+					Term: 1,
+					Cmd:  []byte("20"),
+				},
+				Data:             []byte(SnapshotContent),
+				CommittedEntries: []Entry{},
+			},
+			expectedFirstLogIndex:       20,
+			expectedLastLogIndex:        20,
+			expectedCommitAndApplyIndex: 20,
+			expectedLogEntries: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("20"),
+				},
+			},
+		},
+		{
+			description:                  "install at last log entry",
+			initialLastLogIdx:            20,
+			initialCommitAndApplyIndex:   10,
+			initialLogOffset:             9,
+			expectedInitialFirstLogIndex: 10,
+			expectedInitialLastLogIndex:  20,
+			snapshotReq: InstallSnapshotRequest{
+				LeaderId:          id,
+				Term:              1,
+				SnapshotCommitIdx: 20,
+				LastIncludedSnapshotEntry: Entry{
+					Term: 1,
+					Cmd:  []byte("20"),
+				},
+				Data: []byte(SnapshotContent),
+				CommittedEntries: []Entry{
+					{
+						Term: 1,
+						Cmd:  []byte("21"),
+					},
+					{
+						Term: 1,
+						Cmd:  []byte("22"),
+					},
+				},
+			},
+			expectedFirstLogIndex:       20,
+			expectedLastLogIndex:        22,
+			expectedCommitAndApplyIndex: 22,
+			expectedLogEntries: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("20"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("21"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("22"),
+				},
+			},
+		},
+		{
+			description:                  "install one below highest",
+			initialLastLogIdx:            13,
+			initialCommitAndApplyIndex:   11,
+			initialLogOffset:             9,
+			expectedInitialFirstLogIndex: 10,
+			expectedInitialLastLogIndex:  13,
+			snapshotReq: InstallSnapshotRequest{
+				LeaderId:          id,
+				Term:              1,
+				SnapshotCommitIdx: 12,
+				LastIncludedSnapshotEntry: Entry{
+					Term: 1,
+					Cmd:  []byte("12"),
+				},
+				Data:             []byte(SnapshotContent),
+				CommittedEntries: []Entry{},
+			},
+			expectedFirstLogIndex:       12,
+			expectedLastLogIndex:        13,
+			expectedCommitAndApplyIndex: 12,
+			expectedLogEntries: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("12"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("13"),
+				},
+			},
+		},
+		{
+			description:                  "install one below highest replace all",
+			initialLastLogIdx:            13,
+			initialCommitAndApplyIndex:   11,
+			initialLogOffset:             9,
+			expectedInitialFirstLogIndex: 10,
+			expectedInitialLastLogIndex:  13,
+			snapshotReq: InstallSnapshotRequest{
+				LeaderId:          id,
+				Term:              1,
+				SnapshotCommitIdx: 12,
+				LastIncludedSnapshotEntry: Entry{
+					Term: 1,
+					Cmd:  []byte("12"),
+				},
+				Data: []byte(SnapshotContent),
+				CommittedEntries: []Entry{
+					{
+						Term: 1,
+						Cmd:  []byte("13b"),
+					},
+				},
+			},
+			expectedFirstLogIndex:       12,
+			expectedLastLogIndex:        13,
+			expectedCommitAndApplyIndex: 13,
+			expectedLogEntries: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("12"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("13b"),
+				},
+			},
+		},
+		{
+			description:                  "install one below highest replace all plus one",
+			initialLastLogIdx:            13,
+			initialCommitAndApplyIndex:   11,
+			initialLogOffset:             9,
+			expectedInitialFirstLogIndex: 10,
+			expectedInitialLastLogIndex:  13,
+			snapshotReq: InstallSnapshotRequest{
+				LeaderId:          id,
+				Term:              1,
+				SnapshotCommitIdx: 12,
+				LastIncludedSnapshotEntry: Entry{
+					Term: 1,
+					Cmd:  []byte("12"),
+				},
+				Data: []byte(SnapshotContent),
+				CommittedEntries: []Entry{
+					{
+						Term: 1,
+						Cmd:  []byte("13b"),
+					},
+					{
+						Term: 1,
+						Cmd:  []byte("14"),
+					},
+				},
+			},
+			expectedFirstLogIndex:       12,
+			expectedLastLogIndex:        14,
+			expectedCommitAndApplyIndex: 14,
+			expectedLogEntries: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("12"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("13b"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("14"),
+				},
+			},
+		},
 	}
 
-	for description, testCase := range testCases {
-		t.Run(description, func(t *testing.T) {
+	for _, testCase := range testCases {
+		t.Run(testCase.description, func(t *testing.T) {
 
 			stateMachine := &MockStateMachine{}
 			// create raft node
 			node := &RaftNodeImpl{
 				id: id,
-				// TODO: mock statemachine
 				stateMachine:             stateMachine,
 				quitCh:                   make(chan bool),
 				inboundMessages:          make(chan []byte, 1000),
@@ -2010,8 +2599,8 @@ func TestHandleSnapshots(t *testing.T) {
 			}
 
 			// trim log for initial state
-			if testCase.initialFirstLogIdx > 0 {
-				node.storage.DeleteEntriesUpTo(testCase.initialFirstLogIdx)
+			if testCase.initialLogOffset > 0 {
+				node.storage.DeleteEntriesUpTo(testCase.initialLogOffset)
 			}
 
 			// TODO: sanity check mock state machine?

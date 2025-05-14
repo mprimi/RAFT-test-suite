@@ -646,13 +646,17 @@ func (store *BadgerStorage) AdjustOffset(offsetIndex uint64) {
 	firstLogIdx := store.GetFirstLogIndex()
 
 	// guard: only should be invoked if log is empty
-	// NOTE: may relax this guard later, for now checking only for misuse
-	if lastLogIdx != 0 || firstLogIdx > 1 {
+	if firstLogIdx == 1 && lastLogIdx == 0 {
+		// log is empty
+	} else if lastLogIdx-firstLogIdx > 0 {
+		// log has no entries
+	} else {
 		assert.Unreachable(
 			"Attempting to adjust offset on non-empty log",
 			map[string]any{
-				"firstLogIdx": firstLogIdx,
-				"lastLogIdx":  lastLogIdx,
+				"firstLogIdx":        firstLogIdx,
+				"lastLogIdx":         lastLogIdx,
+				"attemptedOffsetIdx": offsetIndex,
 			},
 		)
 		panic(fmt.Errorf("attempting to adjust offset on non-empty log"))

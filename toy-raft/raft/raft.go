@@ -1462,8 +1462,10 @@ func (rn *RaftNodeImpl) handleInstallSnapshotRequest(installSnapshotRequest *Ins
 			trimIndex := min(rn.storage.GetLastLogIndex(), snapshotHighestCommittedEntryIndex)
 			rn.Log("Trimming log up until %d", trimIndex)
 			rn.storage.DeleteEntriesUpTo(trimIndex)
-		} else {
-			// nothing to trim, just bump firstLogIdx
+		}
+
+		//  bump firstLogIdx if needed
+		if rn.storage.GetFirstLogIndex() < snapshotHighestCommittedEntryIndex+1 {
 			rn.storage.AdjustOffset(snapshotHighestCommittedEntryIndex + 1)
 		}
 
