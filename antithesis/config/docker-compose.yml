@@ -4,7 +4,7 @@ services:
     hostname: replica-A
     image: raft_sut:latest
     entrypoint: /bin/raft-replica
-    command: -replica-id replica-A -group-id "test-raft" -nats-url nats://nats-server:4222 -peers replica-A,replica-B,replica-C
+    command: -replica-id replica-A -group-id "test-raft" -nats-url nats://nats-server:4222 -peers replica-A,replica-B,replica-C -time-limit "5m"
     networks:
       antithesis-net:
         ipv4_address: 10.20.20.2
@@ -22,7 +22,7 @@ services:
     hostname: replica-B
     image: raft_sut:latest
     entrypoint: /bin/raft-replica
-    command: -replica-id replica-B -group-id "test-raft" -nats-url nats://nats-server:4222 -peers replica-A,replica-B,replica-C
+    command: -replica-id replica-B -group-id "test-raft" -nats-url nats://nats-server:4222 -peers replica-A,replica-B,replica-C -time-limit "5m"
     networks:
       antithesis-net:
         ipv4_address: 10.20.20.3
@@ -40,7 +40,7 @@ services:
     hostname: replica-C
     image: raft_sut:latest
     entrypoint: /bin/raft-replica
-    command: -replica-id replica-C -group-id "test-raft" -nats-url nats://nats-server:4222 -peers replica-A,replica-B,replica-C
+    command: -replica-id replica-C -group-id "test-raft" -nats-url nats://nats-server:4222 -peers replica-A,replica-B,replica-C -time-limit "5m"
     networks:
       antithesis-net:
         ipv4_address: 10.20.20.4

@@ -25,11 +25,13 @@ func main() {
 		groupId    string
 		natsUrl    string
 		peerString string
+		timeLimit  time.Duration
 	)
 	flag.StringVar(&replicaId, "replica-id", "", "unique id of replica")
 	flag.StringVar(&groupId, "group-id", "", "raft group id")
 	flag.StringVar(&natsUrl, "nats-url", nats.DefaultURL, "nats url")
 	flag.StringVar(&peerString, "peers", "", "comma separated list of peer ids (including self)")
+	flag.DurationVar(&timeLimit, "time-limit", 0, "lifetime duration of replica")
 	flag.Parse()
 
 	fatalErr := func(err error) {
@@ -67,9 +69,17 @@ func main() {
 	rng := rand.New(rand.NewSource(12345))
 	buffer := make([]byte, 10)
 
+	timer := time.NewTimer(timeLimit)
+	if timeLimit == 0 {
+		timer.Stop()
+	}
+
 	// Block forever
 	for {
 		select {
+		case <-timer.C:
+			fmt.Println("Time limit reached, exiting...")
+			return
 		case <-time.After(1 * time.Second):
 			rng.Read(buffer)
 			if err := srv.Propose(buffer); err != nil {
