@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"toy-raft/network"
 	"toy-raft/state"
 )
 
@@ -19,13 +20,16 @@ type ServerImpl struct {
 	RaftNode RaftNode
 	// state machine
 	StateMachine state.StateMachine
+
+	network network.Network
 }
 
-func NewServer(id string, raftNode RaftNode, stateMachine state.StateMachine) *ServerImpl {
+func NewServer(id string, raftNode RaftNode, stateMachine state.StateMachine, network network.Network) *ServerImpl {
 	return &ServerImpl{
 		Id:           id,
 		RaftNode:     raftNode,
 		StateMachine: stateMachine,
+		network:      network,
 	}
 }
 

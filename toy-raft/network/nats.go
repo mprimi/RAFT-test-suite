@@ -14,7 +14,6 @@ type NatsNetwork struct {
 	conn *nats.Conn
 
 	groupId          string
-	proposalSubject  string
 	broadcastSubject string
 	unicastPrefix    string
 
@@ -35,7 +34,6 @@ func NewNatsNetwork(groupId, natsUrl string) (Network, error) {
 	natsNetwork := &NatsNetwork{
 		conn:             nc,
 		groupId:          groupId,
-		proposalSubject:  fmt.Sprintf("%s.%s.proposal", NatsSubjectPrefix, groupId),
 		broadcastSubject: fmt.Sprintf("%s.%s.broadcast", NatsSubjectPrefix, groupId),
 		unicastPrefix:    fmt.Sprintf("%s.%s", NatsSubjectPrefix, groupId),
 		networkDevices:   make(map[string]NetworkDevice),

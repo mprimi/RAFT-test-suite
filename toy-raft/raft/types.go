@@ -86,6 +86,7 @@ const (
 	AppendEntriesResponseOp
 	InstallSnapshotRequestOp
 	InstallSnapshotResponseOp
+	ProposalOp
 )
 
 func (ot OperationType) String() string {
@@ -102,9 +103,27 @@ func (ot OperationType) String() string {
 		return "InstallSnapshotRequest"
 	case InstallSnapshotResponseOp:
 		return "InstallSnapshotResponse"
+	case ProposalOp:
+		return "Proposal"
 	default:
 		return "unknown operation type"
 	}
+}
+
+type Proposal struct {
+	Data []byte
+}
+
+func (p *Proposal) Bytes() []byte {
+	bytes, err := json.Marshal(p)
+	if err != nil {
+		panic(err)
+	}
+	return bytes
+}
+
+func (p *Proposal) OpType() OperationType {
+	return ProposalOp
 }
 
 type InstallSnapshotRequest struct {

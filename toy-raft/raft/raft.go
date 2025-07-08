@@ -3,6 +3,7 @@ package raft
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -125,6 +126,8 @@ func parseMessage(messageBytes []byte) (OperationType, any, error) {
 		message = &InstallSnapshotRequest{}
 	case InstallSnapshotResponseOp:
 		message = &InstallSnapshotResponse{}
+	case ProposalOp:
+		message = &Proposal{}
 	default:
 		return 0, nil, fmt.Errorf("unknown operation type %d", envelope.OperationType)
 	}
@@ -224,6 +227,9 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 
 		case InstallSnapshotResponseOp:
 			rn.handleInstallSnapshotResponse(message.(*InstallSnapshotResponse))
+
+		case ProposalOp:
+			rn.handleProposal(message.(*Proposal))
 
 		default:
 			rn.Log("unknown operation type %d", opType)
@@ -564,6 +570,20 @@ func (rn *RaftNodeImpl) entriesToSendToFollower(followerId string) []Entry {
 		return rn.storage.GetLogEntriesFrom(rn.followersStateMap[followerId].nextIndex)
 	}
 	return []Entry{}
+}
+
+func (rn *RaftNodeImpl) handleProposal(proposal *Proposal) {
+	err := rn.Propose(proposal.Data)
+	if err == nil {
+		// good
+	} else if errors.Is(err, ErrNotLeader) {
+		// swallow the error
+	} else {
+		assert.Unreachable("unexpected error while proposing", map[string]any{
+			"error": err,
+		})
+		panic(fmt.Errorf("unexpected error while proposing: %w", err))
+	}
 }
 
 func (rn *RaftNodeImpl) handleAppendEntriesRequest(appendEntriesRequest *AppendEntriesRequest) {
@@ -1225,6 +1245,12 @@ func messageToString(opType OperationType, message any) string {
 			"FROM: %s CI:%d",
 			installSnapshotResponse.ResponderId,
 			installSnapshotResponse.CommitIdx,
+		)
+	case ProposalOp:
+		proposal := message.(*Proposal)
+		msgString = fmt.Sprintf(
+			"Proposal of %d bytes",
+			len(proposal.Data),
 		)
 
 	default:

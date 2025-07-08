@@ -1,14 +1,20 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
+	"math/rand"
 	"os"
 	"time"
+	"toy-raft/network"
+	"toy-raft/raft"
 
 	"github.com/antithesishq/antithesis-sdk-go/lifecycle"
 	"github.com/nats-io/nats.go"
 )
+
+const ProposalSubjSuffix = "PROPOSALS"
 
 func main() {
 	var (
@@ -45,11 +51,36 @@ func main() {
 	// If running in antithesis, signal setup is complete
 	lifecycle.SetupComplete(nil)
 
+	rng := rand.New(rand.NewSource(12345))
+	buffer := make([]byte, 10)
+
+	statsTicker := time.NewTicker(10 * time.Second)
+	proposalCount := 0
+
 	// Block forever
 	for {
 		select {
-		case <-time.After(5 * time.Second):
-			fmt.Printf("Idle...\n")
+		case <-statsTicker.C:
+			fmt.Printf("%d proposals\n", proposalCount)
+		case <-time.After(1 * time.Second):
+			fmt.Printf("Proposing...\n")
+			rng.Read(buffer)
+			proposal := &raft.Proposal{
+				Data: buffer,
+			}
+			envelope := raft.Envelope{
+				OperationType: raft.ProposalOp,
+				Payload:       proposal.Bytes(),
+			}
+			payload, err := json.Marshal(envelope)
+			if err != nil {
+				panic(fmt.Errorf("failed to marshal proposal payload %w", err))
+			}
+			if err := nc.Publish(fmt.Sprintf("%s.%s.%s", network.NatsSubjectPrefix, groupId, ProposalSubjSuffix), payload); err != nil {
+				fmt.Println("error while proposing: ", err)
+			}
+			proposalCount++
+
 		}
 	}
 }
