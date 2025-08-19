@@ -38,6 +38,16 @@ const (
 	NoPreviousTerm = uint64(0)
 )
 
+type LogLevel int
+
+const (
+	Trace LogLevel = iota
+	Debug
+	Info
+	Warn
+	Error
+)
+
 type RaftOperation interface {
 	Bytes() []byte
 	OpType() OperationType
@@ -83,9 +93,11 @@ type RaftNodeImpl struct {
 	commitIndex uint64
 	// index of highest log entry applied to state machine
 	lastApplied uint64
+
+	logLevel LogLevel
 }
 
-func NewRaftNodeImpl(id string, groupId string, sm state.StateMachine, storage Storage, network network.Network, peers []string) *RaftNodeImpl {
+func NewRaftNodeImpl(id string, groupId string, sm state.StateMachine, storage Storage, network network.Network, peers []string, logLevel LogLevel) *RaftNodeImpl {
 	peersMap := make(map[string]bool, len(peers))
 	for _, peer := range peers {
 		peersMap[peer] = true
@@ -103,6 +115,7 @@ func NewRaftNodeImpl(id string, groupId string, sm state.StateMachine, storage S
 		state:            Follower,
 		commitIndex:      0,
 		lastApplied:      0,
+		logLevel:         logLevel,
 	}
 }
 
@@ -196,18 +209,18 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 				panic(fmt.Errorf("failed to append entry: %w", err))
 			}
 		} else {
-			rn.Log("ignoring proposal since we are not leader")
+			rn.Debug("ignoring proposal since we are not leader")
 		}
 	case inboundMessage := <-rn.inboundMessages:
 		// handle the new message from network
 		opType, message, err := parseMessage(inboundMessage)
 		if err != nil {
-			rn.Log("bad message: %s", err)
+			rn.Warn("bad message: %s", err)
 			return
 		}
 
 		// Print internal node state and details of inbound request
-		rn.LogState("Processing %s", messageToString(opType, message))
+		rn.LogState(Debug, "Processing %s", messageToString(opType, message))
 
 		switch opType {
 		case AppendEntriesRequestOp:
@@ -232,7 +245,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 			rn.handleProposal(message.(*Proposal))
 
 		default:
-			rn.Log("unknown operation type %d", opType)
+			rn.Warn("unknown operation type %d", opType)
 
 		}
 
@@ -241,7 +254,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 		if rn.state != Follower {
 			panic(fmt.Errorf("election timeout while in state %s", rn.state))
 		}
-		rn.Log("election timeout, converting to candidate")
+		rn.Info("election timeout, converting to candidate")
 		rn.convertToCandidate()
 
 	case <-rn.voteResponseTimeoutTimer.C:
@@ -249,7 +262,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 		if rn.state != Candidate {
 			panic(fmt.Errorf("vote response timeout while in state %s", rn.state))
 		}
-		rn.Log("election timeout, restarting campaign")
+		rn.Info("election timeout, restarting campaign")
 		rn.convertToCandidate()
 
 	case <-rn.sendAppendEntriesTicker.C:
@@ -284,7 +297,7 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 		panic(fmt.Errorf("followersStateMap is not nil during leader transition"))
 	}
 
-	rn.Log("ascending to leader")
+	rn.Info("ascending to leader")
 
 	// Set state
 	rn.state = Leader
@@ -336,7 +349,7 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 		RequestId:       uuid.NewString(),
 	}
 	rn.BroadcastMessage(initialAppendEntryRequest)
-	rn.Log("broadcast first (empty) AE requests to followers")
+	rn.Debug("broadcast first (empty) AE requests to followers")
 
 	// After sending it, mark down the time it was sent
 	now := time.Now()
@@ -375,7 +388,7 @@ func (rn *RaftNodeImpl) convertToCandidate() {
 	rn.voteMap[rn.id] = true
 	// request votes from other nodes
 	rn.requestVotes(currentTerm, rn.id)
-	rn.Log("converted to candidate, requested votes from other nodes")
+	rn.Debug("converted to candidate, requested votes from other nodes")
 }
 
 // this method is triggered by receiving an RPC with a higher term, regardless of state
@@ -405,7 +418,7 @@ func (rn *RaftNodeImpl) stepdown() {
 	case Leader:
 		rn.followersStateMap = nil
 		stopAndDrainTicker(rn.sendAppendEntriesTicker)
-		rn.Log("leader stepped down, cleared followersStateMap, and stopped sendAppendEntriesTicker")
+		rn.Debug("leader stepped down, cleared followersStateMap, and stopped sendAppendEntriesTicker")
 		resetAndRestartTimer(rn.electionTimeoutTimer, randomTimerDuration(minElectionTimeout, maxElectionTimeout))
 		swapped := rn.acceptingProposals.CompareAndSwap(true, false)
 		// guard:
@@ -415,7 +428,7 @@ func (rn *RaftNodeImpl) stepdown() {
 	case Candidate:
 		rn.voteMap = nil
 		stopAndDrainTimer(rn.voteResponseTimeoutTimer)
-		rn.Log("candidate stepped down, cleared voteMap, and stopped voteResponseTimeoutTimer")
+		rn.Debug("candidate stepped down, cleared voteMap, and stopped voteResponseTimeoutTimer")
 		resetAndRestartTimer(rn.electionTimeoutTimer, randomTimerDuration(minElectionTimeout, maxElectionTimeout))
 	case Follower:
 		// already follower
@@ -453,8 +466,10 @@ func (rn *RaftNodeImpl) Stop() {
 	rn.quitCh <- true
 }
 
-func (rn *RaftNodeImpl) Log(format string, args ...any) {
-
+func (rn *RaftNodeImpl) log(logLevel LogLevel, format string, args ...any) {
+	if rn.logLevel > logLevel {
+		return
+	}
 	stateIcon := func() string {
 		switch rn.state {
 		case Leader:
@@ -482,7 +497,23 @@ func (rn *RaftNodeImpl) Log(format string, args ...any) {
 	log.Printf(header+format+"\n", args...)
 }
 
-func (rn *RaftNodeImpl) LogState(format string, args ...any) {
+func (rn *RaftNodeImpl) Trace(format string, args ...any) {
+	rn.log(Trace, format, args...)
+}
+
+func (rn *RaftNodeImpl) Debug(format string, args ...any) {
+	rn.log(Debug, format, args...)
+}
+
+func (rn *RaftNodeImpl) Info(format string, args ...any) {
+	rn.log(Info, format, args...)
+}
+
+func (rn *RaftNodeImpl) Warn(format string, args ...any) {
+	rn.log(Warn, format, args...)
+}
+
+func (rn *RaftNodeImpl) LogState(logLevel LogLevel, format string, args ...any) {
 
 	b := strings.Builder{}
 	b.WriteString("{")
@@ -514,7 +545,7 @@ func (rn *RaftNodeImpl) LogState(format string, args ...any) {
 	}
 	b.WriteString(" } ")
 
-	rn.Log(b.String()+format, args...)
+	rn.log(logLevel, b.String()+format, args...)
 }
 
 var ErrNotLeader = fmt.Errorf("not leader")
@@ -545,7 +576,7 @@ func (rn *RaftNodeImpl) BroadcastMessage(msg RaftOperation) {
 		OperationType: opType,
 		Payload:       msg.Bytes(),
 	}
-	rn.Log("Broadcast: %s", messageToString(opType, msg))
+	rn.Trace("Broadcast: %s", messageToString(opType, msg))
 	rn.network.Broadcast(msgEnvelope.Bytes())
 }
 
@@ -559,7 +590,7 @@ func (rn *RaftNodeImpl) SendMessage(peerId string, msg RaftOperation) {
 		OperationType: opType,
 		Payload:       msg.Bytes(),
 	}
-	rn.Log("Send to %s: %s", peerId, messageToString(opType, msg))
+	rn.Trace("Send to %s: %s", peerId, messageToString(opType, msg))
 	rn.network.Send(peerId, msgEnvelope.Bytes())
 }
 
@@ -592,13 +623,13 @@ func (rn *RaftNodeImpl) handleAppendEntriesRequest(appendEntriesRequest *AppendE
 
 	// peer is unknown, ignore request
 	if !rn.isKnownPeer(appendEntriesRequest.LeaderId) {
-		rn.Log("ignoring AppendEntries request from unknown peer: %s", appendEntriesRequest.LeaderId)
+		rn.Debug("ignoring AppendEntries request from unknown peer: %s", appendEntriesRequest.LeaderId)
 		return
 	}
 
 	// request has higher term, stepdown and update term
 	if appendEntriesRequest.Term > currentTerm {
-		rn.Log("stepping down and updating term (currentTerm: %d -> requestTerm: %d) due to AppendEntries request having a higher term", currentTerm, appendEntriesRequest.Term)
+		rn.Info("stepping down and updating term (currentTerm: %d -> requestTerm: %d) due to AppendEntries request having a higher term", currentTerm, appendEntriesRequest.Term)
 		// set new term to append entries request term
 		rn.stepdownDueToHigherTerm(appendEntriesRequest.Term)
 		// refresh value
@@ -642,7 +673,7 @@ func (rn *RaftNodeImpl) handleAppendEntriesRequest(appendEntriesRequest *AppendE
 				"prevLogTerm": appendEntriesRequest.PrevLogTerm,
 			},
 		)
-		rn.Log(
+		rn.Warn(
 			"Leader sent invalid AERequest with PrevLogIdx: %d and PrevLogTerm: %d, ignoring",
 			appendEntriesRequest.PrevLogIdx,
 			appendEntriesRequest.PrevLogTerm,
@@ -663,12 +694,12 @@ func (rn *RaftNodeImpl) handleAppendEntriesRequest(appendEntriesRequest *AppendE
 		// no entry exists
 		entry, exists := rn.storage.GetLogEntry(appendEntriesRequest.PrevLogIdx)
 		if !exists {
-			rn.Log("found non-existent log entry at index %d when comparing with leader", appendEntriesRequest.PrevLogIdx)
+			rn.Debug("found non-existent log entry at index %d when comparing with leader", appendEntriesRequest.PrevLogIdx)
 			resp.Success = false
 			rn.SendMessage(appendEntriesRequest.LeaderId, resp)
 			return
 		} else if entry.Term != appendEntriesRequest.PrevLogTerm {
-			rn.Log("discovered log inconsistency with leader at index %d, expected term %d, got term %d", appendEntriesRequest.PrevLogIdx, appendEntriesRequest.PrevLogTerm, entry.Term)
+			rn.Debug("discovered log inconsistency with leader at index %d, expected term %d, got term %d", appendEntriesRequest.PrevLogIdx, appendEntriesRequest.PrevLogTerm, entry.Term)
 			resp.Success = false
 			rn.SendMessage(appendEntriesRequest.LeaderId, resp)
 			return
@@ -677,25 +708,25 @@ func (rn *RaftNodeImpl) handleAppendEntriesRequest(appendEntriesRequest *AppendE
 
 	// append entries from request
 	logEntryToBeAddedIdx := appendEntriesRequest.PrevLogIdx + 1
-	rn.Log("attempting to add %d entries to log starting at index %d", len(appendEntriesRequest.Entries), logEntryToBeAddedIdx)
+	rn.Debug("attempting to add %d entries to log starting at index %d", len(appendEntriesRequest.Entries), logEntryToBeAddedIdx)
 	for i, entry := range appendEntriesRequest.Entries {
 		logEntry, exists := rn.storage.GetLogEntry(logEntryToBeAddedIdx)
 		if !exists {
-			rn.Log("appending entry %d/%d (%+v) at index %d", i+1, len(appendEntriesRequest.Entries), entry, logEntryToBeAddedIdx)
+			rn.Trace("appending entry %d/%d (%+v) at index %d", i+1, len(appendEntriesRequest.Entries), entry, logEntryToBeAddedIdx)
 			err := rn.storage.AppendEntry(entry)
 			if err != nil {
 				panic(fmt.Errorf("failed to append entry: %w", err))
 			}
 		} else if entry.Term != logEntry.Term {
-			rn.Log("deleting entries from index %d", logEntryToBeAddedIdx)
+			rn.Trace("deleting entries from index %d", logEntryToBeAddedIdx)
 			rn.storage.DeleteEntriesFrom(logEntryToBeAddedIdx)
-			rn.Log("appending entry %d/%d (%+v) at index %d", i+1, len(appendEntriesRequest.Entries), entry, logEntryToBeAddedIdx)
+			rn.Trace("appending entry %d/%d (%+v) at index %d", i+1, len(appendEntriesRequest.Entries), entry, logEntryToBeAddedIdx)
 			err := rn.storage.AppendEntry(entry)
 			if err != nil {
 				panic(fmt.Errorf("failed to append entry: %w", err))
 			}
 		} else {
-			rn.Log("entry %d/%d, already exists at index %d", i+1, len(appendEntriesRequest.Entries), logEntryToBeAddedIdx)
+			rn.Trace("entry %d/%d, already exists at index %d", i+1, len(appendEntriesRequest.Entries), logEntryToBeAddedIdx)
 		}
 		logEntryToBeAddedIdx++
 	}
@@ -763,7 +794,7 @@ func (rn *RaftNodeImpl) handleAppendEntriesRequest(appendEntriesRequest *AppendE
 			)
 			panic(fmt.Errorf("attempting to apply entry that is not in log"))
 		}
-		rn.Log("applying entry %d to state machine", i)
+		rn.Debug("applying entry %d to state machine", i)
 		rn.applyUpdate(entry)
 	}
 	rn.lastApplied = rn.commitIndex
@@ -774,24 +805,24 @@ func (rn *RaftNodeImpl) handleAppendEntriesResponse(appendEntriesResponse *Appen
 	currentTerm := rn.storage.GetCurrentTerm()
 
 	if !rn.isKnownPeer(appendEntriesResponse.ResponderId) {
-		rn.Log("ignoring append entries response from unknown peer: %s", appendEntriesResponse.ResponderId)
+		rn.Trace("ignoring append entries response from unknown peer: %s", appendEntriesResponse.ResponderId)
 		return
 	}
 
 	if appendEntriesResponse.Term > currentTerm {
 		// set new term to vote request term
-		rn.Log("append entries response with a higher term: %d", appendEntriesResponse.Term)
+		rn.Debug("append entries response with a higher term: %d", appendEntriesResponse.Term)
 		rn.stepdownDueToHigherTerm(appendEntriesResponse.Term)
 		return
 	}
 
 	if rn.state != Leader {
-		rn.Log("ignoring append entries response as not leader")
+		rn.Debug("ignoring append entries response as not leader")
 		return
 	}
 
 	if appendEntriesResponse.Term < currentTerm {
-		rn.Log("ignoring append entries response with a lower term: %d", appendEntriesResponse.Term)
+		rn.Debug("ignoring append entries response with a lower term: %d", appendEntriesResponse.Term)
 		return
 	}
 
@@ -810,12 +841,12 @@ func (rn *RaftNodeImpl) handleAppendEntriesResponse(appendEntriesResponse *Appen
 	}
 
 	if followerState.pendingRequest == nil {
-		rn.Log("ignoring append entries response, not waiting for a response from this follower")
+		rn.Debug("ignoring append entries response, not waiting for a response from this follower")
 		return
 	}
 
 	if followerState.pendingRequest.RequestId != appendEntriesResponse.RequestId {
-		rn.Log("ignoring append entries response for old request")
+		rn.Debug("ignoring append entries response for old request")
 		return
 	}
 
@@ -860,7 +891,7 @@ func (rn *RaftNodeImpl) handleAppendEntriesResponse(appendEntriesResponse *Appen
 			panic(fmt.Errorf("follower commit index lower than follower match index"))
 		}
 
-		rn.Log("Follower %s rejected AE request due to higher commit index: %d", appendEntriesResponse.ResponderId, appendEntriesResponse.CommitIndex)
+		rn.Debug("Follower %s rejected AE request due to higher commit index: %d", appendEntriesResponse.ResponderId, appendEntriesResponse.CommitIndex)
 		followerState.matchIndex = appendEntriesResponse.CommitIndex
 		followerState.nextIndex = appendEntriesResponse.CommitIndex + 1
 
@@ -868,7 +899,7 @@ func (rn *RaftNodeImpl) handleAppendEntriesResponse(appendEntriesResponse *Appen
 		rn.sendAppendEntryToFollower(appendEntriesResponse.ResponderId, followerState)
 
 	} else {
-		rn.Log("Follower %s rejected AE request, lowering nextIndex...", appendEntriesResponse.ResponderId)
+		rn.Debug("Follower %s rejected AE request, lowering nextIndex...", appendEntriesResponse.ResponderId)
 		// NOTE: this only executes if log doesn't match
 		if followerState.nextIndex > 1 {
 			// minimum next index is 1
@@ -934,7 +965,7 @@ func (rn *RaftNodeImpl) handleAppendEntriesResponse(appendEntriesResponse *Appen
 			// NOTE: as an optimization we could just break here since it is guaranteed that all
 			// entries previous to this will have lower terms than us
 			if currentTerm != logEntry.Term {
-				rn.Log("cannot set commitIndex to %d, term mismatch", n)
+				rn.Warn("cannot set commitIndex to %d, term mismatch", n)
 				continue
 			}
 			// count how many peer's log matches leader's upto N
@@ -947,7 +978,7 @@ func (rn *RaftNodeImpl) handleAppendEntriesResponse(appendEntriesResponse *Appen
 			// majority of peers has entry[n], commit entries up to N
 			if count >= quorum {
 				rn.commitIndex = n
-				rn.Log("commit index updated to %d", n)
+				rn.Info("commit index updated to %d", n)
 				break
 			}
 		}
@@ -960,13 +991,13 @@ func (rn *RaftNodeImpl) handleVoteRequest(voteRequest *VoteRequest) {
 	lastLogIndex, lastLogEntryTerm := rn.storage.GetLastLogIndexAndTerm()
 
 	if !rn.isKnownPeer(voteRequest.CandidateId) {
-		rn.Log("ignoring vote request from unknown peer: %s", voteRequest.CandidateId)
+		rn.Debug("ignoring vote request from unknown peer: %s", voteRequest.CandidateId)
 		return
 	}
 
 	if voteRequest.Term > currentTerm {
 		// set new term to vote request term
-		rn.Log("vote request with a higher term, currentTerm: %d, voteRequestTerm: %d", currentTerm, voteRequest.Term)
+		rn.Debug("vote request with a higher term, currentTerm: %d, voteRequestTerm: %d", currentTerm, voteRequest.Term)
 		rn.stepdownDueToHigherTerm(voteRequest.Term)
 		// refresh value
 		currentTerm = rn.storage.GetCurrentTerm()
@@ -974,22 +1005,22 @@ func (rn *RaftNodeImpl) handleVoteRequest(voteRequest *VoteRequest) {
 
 	var voteGranted bool
 	if voteRequest.Term < currentTerm {
-		rn.Log("vote not granted to %s, voteRequestTerm %d < currentTerm %d", voteRequest.CandidateId, voteRequest.Term, currentTerm)
+		rn.Info("vote not granted to %s, voteRequestTerm %d < currentTerm %d", voteRequest.CandidateId, voteRequest.Term, currentTerm)
 		voteGranted = false
 	} else if rn.storage.Voted() && rn.storage.GetVotedFor() != voteRequest.CandidateId {
-		rn.Log("vote not granted to %s, already voted for %s in term %d", voteRequest.CandidateId, rn.storage.GetVotedFor(), rn.storage.GetCurrentTerm())
+		rn.Info("vote not granted to %s, already voted for %s in term %d", voteRequest.CandidateId, rn.storage.GetVotedFor(), rn.storage.GetCurrentTerm())
 		voteGranted = false
 	} else if lastLogEntryTerm > voteRequest.LastLogTerm {
-		rn.Log("vote not granted to %s, lastLogTerm %d > voteRequestLastLogTerm %d", voteRequest.CandidateId, lastLogEntryTerm, voteRequest.LastLogTerm)
+		rn.Info("vote not granted to %s, lastLogTerm %d > voteRequestLastLogTerm %d", voteRequest.CandidateId, lastLogEntryTerm, voteRequest.LastLogTerm)
 		voteGranted = false
 	} else if lastLogEntryTerm == voteRequest.LastLogTerm && lastLogIndex > voteRequest.LastLogIndex {
-		rn.Log("vote not granted to %s, lastLogIndex %d > voteRequestLastLogIndex %d with same term %d", voteRequest.CandidateId, lastLogIndex, voteRequest.LastLogIndex, lastLogEntryTerm)
+		rn.Info("vote not granted to %s, lastLogIndex %d > voteRequestLastLogIndex %d with same term %d", voteRequest.CandidateId, lastLogIndex, voteRequest.LastLogIndex, lastLogEntryTerm)
 		voteGranted = false
 	} else if rn.storage.Voted() && rn.storage.GetVotedFor() == voteRequest.CandidateId {
-		rn.Log("already voted %s for them in term: %d, granted vote anyway", voteRequest.CandidateId, currentTerm)
+		rn.Info("already voted %s for them in term: %d, granted vote anyway", voteRequest.CandidateId, currentTerm)
 		voteGranted = true
 	} else {
-		rn.Log("granted vote to %s with term %d", voteRequest.CandidateId, voteRequest.Term)
+		rn.Info("granted vote to %s with term %d", voteRequest.CandidateId, voteRequest.Term)
 		voteGranted = true
 		rn.storage.VoteFor(voteRequest.CandidateId, voteRequest.Term)
 	}
@@ -1013,40 +1044,40 @@ func (rn *RaftNodeImpl) handleVoteResponse(voteResponse *VoteResponse) {
 	currentTerm := rn.storage.GetCurrentTerm()
 
 	if !rn.isKnownPeer(voteResponse.VoterId) {
-		rn.Log("ignoring vote response from unknown peer: %s", voteResponse.VoterId)
+		rn.Info("ignoring vote response from unknown peer: %s", voteResponse.VoterId)
 		return
 	}
 
 	if voteResponse.Term > currentTerm {
-		rn.Log("received vote response with a higher term, voteResponseTerm: %d", voteResponse.Term)
+		rn.Info("received vote response with a higher term, voteResponseTerm: %d", voteResponse.Term)
 		rn.stepdownDueToHigherTerm(voteResponse.Term)
 		return
 	} else if voteResponse.Term < currentTerm {
-		rn.Log("ignoring vote response from previous term %d", voteResponse.Term)
+		rn.Info("ignoring vote response from previous term %d", voteResponse.Term)
 		return
 	} else {
-		rn.Log("received vote response from %s", voteResponse.VoterId)
+		rn.Info("received vote response from %s", voteResponse.VoterId)
 	}
 
 	// if we are not candidate, ignore
 	if rn.state != Candidate {
-		rn.Log("ignoring vote response, not a candidate")
+		rn.Debug("ignoring vote response, not a candidate")
 		return
 	}
 
 	if !voteResponse.VoteGranted {
-		rn.Log("voter %s voted no", voteResponse.VoterId)
+		rn.Debug("voter %s voted no", voteResponse.VoterId)
 		return
 	}
 
 	_, exists := rn.voteMap[voteResponse.VoterId]
 	if exists {
-		rn.Log("received duplicate vote from %s", voteResponse.VoterId)
+		rn.Debug("received duplicate vote from %s", voteResponse.VoterId)
 		return
 	}
 
 	// add vote to map
-	rn.Log("recording vote from %s", voteResponse.VoterId)
+	rn.Trace("recording vote from %s", voteResponse.VoterId)
 	rn.voteMap[voteResponse.VoterId] = true
 
 	voteCount := len(rn.voteMap)
@@ -1064,12 +1095,12 @@ func (rn *RaftNodeImpl) sendAppendEntryToFollower(followerId string, followerSta
 
 	// catchup a follower who needs entries below our trim threshold
 	if firstLogIndex > prevLogIndex && firstLogIndex > 1 {
-		rn.Log("Follower %s is below trim threshold (firstLogIndex: %d < prevLogIndex: %d)", followerId, firstLogIndex, prevLogIndex)
+		rn.Info("Follower %s is below trim threshold (firstLogIndex: %d < prevLogIndex: %d)", followerId, firstLogIndex, prevLogIndex)
 		rn.SendSnapshot(followerId)
 		return
 	}
 
-	rn.Log("Sending next AERequest for %s", followerId)
+	rn.Info("Sending next AERequest for %s", followerId)
 
 	prevLogTerm := NoPreviousTerm
 	if prevLogIndex > 0 {
@@ -1114,7 +1145,7 @@ func (rn *RaftNodeImpl) maybeSendAppendEntriesToFollowers() {
 	for followerId, followerState := range rn.followersStateMap {
 		if followerState.pendingRequest != nil && time.Since(followerState.aeTimestamp) > aeResponseTimeoutDuration {
 			// Previous request timed out, send it again
-			rn.Log("AE response timeout, re-sending last AE request to %s", followerId)
+			rn.Info("AE response timeout, re-sending last AE request to %s", followerId)
 			rn.SendMessage(followerId, followerState.pendingRequest)
 			followerState.aeTimestamp = time.Now()
 		} else if followerState.pendingRequest == nil && time.Since(followerState.aeTimestamp) > heartbeatInterval {
@@ -1341,7 +1372,7 @@ func (rn *RaftNodeImpl) getLatestSnapshotFilepath() (string, uint64) {
 		}
 	}
 	if latestSnapshotFilename == "" {
-		rn.Log("No snapshots found")
+		rn.Info("No snapshots found")
 		return "", 0
 	}
 
@@ -1361,7 +1392,7 @@ func (rn *RaftNodeImpl) loadLatestSnapshot() {
 	}
 	defer snapshotFile.Close()
 
-	rn.Log("Loading snapshot from %s...", latestSnapshotFilepath)
+	rn.Info("Loading snapshot from %s...", latestSnapshotFilepath)
 	if err := rn.stateMachine.InstallSnapshot(snapshotFile); err != nil {
 		panic(fmt.Errorf("failed to install snapshot from file: %w", err))
 	}
@@ -1423,14 +1454,14 @@ func (rn *RaftNodeImpl) SendSnapshot(followerId string) {
 		installSnapshotRequest.CommittedEntries = append(installSnapshotRequest.CommittedEntries, entry)
 	}
 
-	rn.Log("Sending a snapshot of %d bytes (up-to index: %d) and %d entries to follower %s", len(snapshotFileBytes), snapshotApplied, len(installSnapshotRequest.CommittedEntries), followerId)
+	rn.Info("Sending a snapshot of %d bytes (up-to index: %d) and %d entries to follower %s", len(snapshotFileBytes), snapshotApplied, len(installSnapshotRequest.CommittedEntries), followerId)
 	rn.SendMessage(followerId, installSnapshotRequest)
 }
 
 func (rn *RaftNodeImpl) handleInstallSnapshotRequest(installSnapshotRequest *InstallSnapshotRequest) {
 	currentTerm := rn.storage.GetCurrentTerm()
 	if currentTerm > installSnapshotRequest.Term {
-		rn.Log("ignoring snapshot from previous term %d", installSnapshotRequest.Term)
+		rn.Info("ignoring snapshot from previous term %d", installSnapshotRequest.Term)
 		return
 	}
 	if rn.state != Follower {
@@ -1473,7 +1504,7 @@ func (rn *RaftNodeImpl) handleInstallSnapshotRequest(installSnapshotRequest *Ins
 	if installSnapshotRequest.SnapshotCommitIdx > rn.commitIndex {
 
 		// 1. install the snapshot to SM, update commit/applied
-		rn.Log("Installing snapshot, snapshotIndex: %d + %d entries", installSnapshotRequest.SnapshotCommitIdx, len(installSnapshotRequest.CommittedEntries))
+		rn.Info("Installing snapshot, snapshotIndex: %d + %d entries", installSnapshotRequest.SnapshotCommitIdx, len(installSnapshotRequest.CommittedEntries))
 		if err := rn.stateMachine.InstallSnapshot(bytes.NewReader(installSnapshotRequest.Data)); err != nil {
 			panic(fmt.Errorf("failed to install snapshot: %w", err))
 		}
@@ -1486,7 +1517,7 @@ func (rn *RaftNodeImpl) handleInstallSnapshotRequest(installSnapshotRequest *Ins
 		if rn.storage.GetLastLogIndex() > 0 {
 			// we're trimming
 			trimIndex := min(rn.storage.GetLastLogIndex(), snapshotHighestCommittedEntryIndex)
-			rn.Log("Trimming log up until %d", trimIndex)
+			rn.Info("Trimming log up until %d", trimIndex)
 			rn.storage.DeleteEntriesUpTo(trimIndex)
 		}
 

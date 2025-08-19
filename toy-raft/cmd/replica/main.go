@@ -57,7 +57,7 @@ func main() {
 	}
 
 	sm := state.NewKeepLastBlocksStateMachine(replicaId, 10)
-	raftNode := raft.NewRaftNodeImpl(replicaId, groupId, sm, raft.NewDiskStorage(replicaId, "raft-store"), natsNetwork, peers)
+	raftNode := raft.NewRaftNodeImpl(replicaId, groupId, sm, raft.NewDiskStorage(replicaId, "raft-store"), natsNetwork, peers, raft.Info)
 	natsNetwork.RegisterNode(replicaId, raftNode)
 	srv := server.NewServer(replicaId, raftNode, sm, natsNetwork)
 	natsNetwork.RegisterNode(ProposalSubjectSuffixID, srv)
